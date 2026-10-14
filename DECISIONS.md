@@ -1,7 +1,11 @@
-# DECISIONS.md  (about 150-200 words in total - plain language, your own words)
+# DECISIONS.md
 
-1. **Indexes.** Which indexes did you create, and which query or guarantee does each one serve? Which one did you consider and reject?
-2. **Punch-in race.** Two identical punch-in requests arrive at the same instant. Walk through exactly what happens in your code.
-3. **Ties.** Two employees are tied on late minutes at the cutoff of `limit`. What does your leaderboard return, and why?
-4. **Headcount.** How does your department summary make sure employees with zero logs are counted?
-5. **One thing you would change** if this had to serve 100x the data.
+1. **Indexes.** I created five indexes. `uq_employees_emp_code` (unique on `emp_code`) enforces uniqueness and serves all employee lookups. `uq_attendance_emp_date` (unique on `emp_code + date`) guarantees one record per employee per day and makes concurrent punch-in safe via `DuplicateKeyError`. `ix_attendance_date_emp` (`date` desc, `emp_code` asc) covers the attendance listing sort order and the date-range filters used by analytics. `ix_attendance_status_date_emp` adds `status` as a prefix for status-filtered queries. `ix_employees_department_emp` (`department`, `emp_code`) covers department-filtered employee listing and the `$lookup` sub-pipelines in analytics. I considered a compound index on `late_minutes + date` specifically for the leaderboard, but rejected it because `ix_attendance_date_emp` already covers the `$match` stage on `date` and the extra index would slow writes without meaningful read benefit at this data volume.
+
+2. **Punch-in race.** Both requests pass validation and call `insert_one` at the same instant. The unique index on `(emp_code, date)` ensures exactly one insert succeeds. The other raises `DuplicateKeyError`, which my code catches and returns HTTP 409. There is no check-then-insert window — the database enforces the constraint atomically.
+
+3. **Ties.** I use `$setWindowFields` with `$rank` (standard competition ranking). If two employees share the same `total_late_minutes` at the `limit` boundary, both get the same rank and both are included because the filter is `rank <= limit`. The response can therefore have more rows than `limit`. Within the same rank, rows are sorted by `emp_code` ascending for deterministic ordering.
+
+4. **Headcount.** Department headcount is computed from the `employees` collection, not from attendance logs. I query all employees with `joined_on <= month_end` (or `<= that day` for the trend), grouped by department. Employees who have zero attendance logs are still counted because the count comes from a separate query/lookup on the employees collection, not from joining or grouping logs.
+
+5. **One thing I would change.** At 100x data I would shard `attendance_logs` on `{emp_code, date}` as the shard key (it is already the unique compound key). This distributes writes evenly across shards, keeps per-employee queries hitting a single shard, and the date-range analytics can use targeted scatter-gather. I would also pre-aggregate monthly summaries into a separate collection on each punch-out or regularization, turning the analytics reads from full-scan aggregations into single-document lookups.
