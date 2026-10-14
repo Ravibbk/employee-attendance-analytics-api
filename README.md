@@ -1,4 +1,6 @@
 # Candidate kit
+Live API:
+https://employee-attendance-analytics-api-cnab.onrender.com/docs
 
 Read in this order:
 
